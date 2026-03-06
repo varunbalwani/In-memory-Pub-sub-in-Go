@@ -32,26 +32,32 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conn := &Connection{
-		ws:     ws,
-		send:   make(chan ServerMessage, h.QueueSize),
-		broker: h.Broker,
-		done:   make(chan struct{}),
+		ws:        ws,
+		send:      make(chan ServerMessage, h.QueueSize),
+		broker:    h.Broker,
+		done:      make(chan struct{}),
+		writeDone: make(chan struct{}),
 	}
 
 	h.Broker.RegisterConnection(conn)
 	go conn.writeLoop()
 	conn.readLoop()
+	// readLoop returned (client disconnected or error).
+	// Signal writeLoop to flush and exit, then wait for it.
+	conn.Close()
+	<-conn.writeDone
 	h.Broker.UnsubscribeAll(conn)
 	h.Broker.DeregisterConnection(conn)
 }
 
 // Connection represents a single WebSocket client connection.
 type Connection struct {
-	ws     *websocket.Conn
-	send   chan ServerMessage
-	broker *broker.Broker
-	done   chan struct{}
-	once   sync.Once
+	ws        *websocket.Conn
+	send      chan ServerMessage
+	broker    *broker.Broker
+	done      chan struct{}
+	writeDone chan struct{}
+	once      sync.Once
 }
 
 // SendCh implements broker.Connection.
@@ -70,6 +76,7 @@ func (c *Connection) Enqueue(msg ServerMessage) bool {
 }
 
 // Close implements broker.Connection — idempotent teardown.
+// Closes done (signals writeLoop to flush) and the WebSocket (unblocks any pending ReadMessage).
 func (c *Connection) Close() {
 	c.once.Do(func() {
 		close(c.done)
@@ -79,7 +86,6 @@ func (c *Connection) Close() {
 
 // readLoop decodes incoming JSON frames and dispatches them.
 func (c *Connection) readLoop() {
-	defer c.Close()
 	for {
 		_, data, err := c.ws.ReadMessage()
 		if err != nil {
@@ -97,8 +103,12 @@ func (c *Connection) readLoop() {
 }
 
 // writeLoop drains the send channel and writes JSON frames to the WebSocket.
+// It owns the WebSocket close so it can flush pending messages before tearing down.
 func (c *Connection) writeLoop() {
-	defer c.ws.Close()
+	defer func() {
+		c.ws.Close()
+		close(c.writeDone)
+	}()
 	for {
 		select {
 		case msg, ok := <-c.send:
@@ -109,16 +119,14 @@ func (c *Connection) writeLoop() {
 				return
 			}
 		case <-c.done:
-			// Drain remaining messages before exiting.
+			// Drain any messages already queued before exiting.
 			for {
 				select {
 				case msg, ok := <-c.send:
 					if !ok {
 						return
 					}
-					if err := c.ws.WriteJSON(msg); err != nil {
-						return
-					}
+					_ = c.ws.WriteJSON(msg) // best-effort flush; ignore write errors
 				default:
 					return
 				}
