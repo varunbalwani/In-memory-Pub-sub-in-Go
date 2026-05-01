@@ -5,7 +5,15 @@ An in-memory publish/subscribe broker written in Go. Clients interact via WebSoc
 ## Build
 
 ```bash
-go build ./cmd/server
+go build -o server ./cmd/server
+```
+
+## Run
+
+```bash
+./server
+# or directly
+go run ./cmd/server
 ```
 
 ## Test
@@ -80,6 +88,50 @@ BACKPRESSURE_POLICY=disconnect ./server
 | GET    | /health           | Health check (uptime, counts)      |
 | GET    | /stats            | Per-topic message and subscriber counts |
 | GET    | /ws               | WebSocket endpoint                 |
+
+### HTTP examples
+
+Create a topic:
+```bash
+curl -X POST http://localhost:8080/topics -H "Content-Type: application/json" -d '{"name":"orders"}'
+# → 201 {"status":"created","topic":"orders"}
+```
+
+Create duplicate topic:
+```bash
+curl -X POST http://localhost:8080/topics -H "Content-Type: application/json" -d '{"name":"orders"}'
+# → 409 {"error":"topic already exists"}
+```
+
+List topics:
+```bash
+curl http://localhost:8080/topics
+# → 200 [{"name":"orders","subscriber_count":0}]
+```
+
+Delete a topic:
+```bash
+curl -X DELETE http://localhost:8080/topics/orders
+# → 200 {"status":"deleted","topic":"orders"}
+```
+
+Delete non-existent topic:
+```bash
+curl -X DELETE http://localhost:8080/topics/ghost
+# → 404 {"error":"topic not found"}
+```
+
+Health check:
+```bash
+curl http://localhost:8080/health
+# → 200 {"uptime_sec":42,"topics":1,"subscribers":0}
+```
+
+Stats:
+```bash
+curl http://localhost:8080/stats
+# → 200 {"topics":[{"name":"orders","msg_count":5,"subscriber_count":2}]}
+```
 
 ## WebSocket Testing
 

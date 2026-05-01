@@ -73,7 +73,7 @@ func (t *Topic) lastN(n int) []Message {
 
 // publish fans out msg to all subscribers, appends to history, and applies backpressure.
 // Must be called with t.mu held (write lock).
-func (t *Topic) publish(msg Message, policy BackpressurePolicy, queueSize int) {
+func (t *Topic) publish(msg Message, policy BackpressurePolicy) {
 	// Append to ring buffer.
 	cap := cap(t.history)
 	if cap > 0 {

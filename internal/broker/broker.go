@@ -159,7 +159,7 @@ func (b *Broker) Publish(topicName string, msg Message) error {
 	policy := BackpressurePolicy(b.cfg.BackpressurePolicy)
 
 	topic.mu.Lock()
-	topic.publish(msg, policy, b.cfg.QueueSize)
+	topic.publish(msg, policy)
 	topic.mu.Unlock()
 	return nil
 }
