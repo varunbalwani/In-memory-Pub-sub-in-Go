@@ -127,10 +127,7 @@ func (b *Broker) DeleteTopic(name string) error {
 	}
 	topic.mu.RLock()
 	for _, sub := range topic.subscribers {
-		select {
-		case sub.send <- info:
-		default:
-		}
+		sub.conn.Enqueue(info) // control message; never evicts a queued topic delivery
 	}
 	topic.mu.RUnlock()
 	return nil
@@ -159,8 +156,14 @@ func (b *Broker) Publish(topicName string, msg Message) error {
 	policy := BackpressurePolicy(b.cfg.BackpressurePolicy)
 
 	topic.mu.Lock()
-	topic.publish(msg, policy)
+	toClose := topic.publish(msg, policy)
 	topic.mu.Unlock()
+
+	// Close outside the topic lock: Close() does socket I/O and must not block
+	// other publishers/subscribers of this topic while it runs.
+	for _, conn := range toClose {
+		conn.Close()
+	}
 	return nil
 }
 
