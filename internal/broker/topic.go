@@ -136,4 +136,5 @@ func (t *Topic) publish(msg Message, policy BackpressurePolicy) []Connection {
 		}
 	}
 	return toClose
+	
 }
