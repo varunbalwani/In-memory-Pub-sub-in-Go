@@ -34,6 +34,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn := &Connection{
 		ws:        ws,
 		send:      make(chan ServerMessage, h.QueueSize),
+		control:   make(chan ServerMessage, h.QueueSize),
 		broker:    h.Broker,
 		done:      make(chan struct{}),
 		writeDone: make(chan struct{}),
@@ -51,24 +52,32 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Connection represents a single WebSocket client connection.
+//
+// Outbound messages travel over two channels: send carries topic-message
+// deliveries, the only messages the broker's backpressure policy is allowed
+// to evict; control carries acks, errors, pongs, and info notices, which are
+// never evicted to make room for a topic delivery.
 type Connection struct {
 	ws        *websocket.Conn
 	send      chan ServerMessage
+	control   chan ServerMessage
 	broker    *broker.Broker
 	done      chan struct{}
 	writeDone chan struct{}
 	once      sync.Once
 }
 
-// SendCh implements broker.Connection.
+// SendCh implements broker.Connection. It returns the data channel used for
+// topic-message deliveries and is the queue backpressure policies act on.
 func (c *Connection) SendCh() chan ServerMessage {
 	return c.send
 }
 
-// Enqueue implements broker.Connection — non-blocking send.
+// Enqueue implements broker.Connection — non-blocking send of a control/info
+// message (e.g. heartbeat pings, topic_deleted notices). Never evicted.
 func (c *Connection) Enqueue(msg ServerMessage) bool {
 	select {
-	case c.send <- msg:
+	case c.control <- msg:
 		return true
 	default:
 		return false
@@ -102,8 +111,9 @@ func (c *Connection) readLoop() {
 	}
 }
 
-// writeLoop drains the send channel and writes JSON frames to the WebSocket.
-// It owns the WebSocket close so it can flush pending messages before tearing down.
+// writeLoop drains the send and control channels and writes JSON frames to
+// the WebSocket. It owns the WebSocket close so it can flush pending
+// messages before tearing down.
 func (c *Connection) writeLoop() {
 	defer func() {
 		c.ws.Close()
@@ -111,6 +121,13 @@ func (c *Connection) writeLoop() {
 	}()
 	for {
 		select {
+		case msg, ok := <-c.control:
+			if !ok {
+				return
+			}
+			if err := c.ws.WriteJSON(msg); err != nil {
+				return
+			}
 		case msg, ok := <-c.send:
 			if !ok {
 				return
@@ -119,9 +136,14 @@ func (c *Connection) writeLoop() {
 				return
 			}
 		case <-c.done:
-			// Drain any messages already queued before exiting.
+			// Drain any messages already queued on either channel before exiting.
 			for {
 				select {
+				case msg, ok := <-c.control:
+					if !ok {
+						return
+					}
+					_ = c.ws.WriteJSON(msg) // best-effort flush; ignore write errors
 				case msg, ok := <-c.send:
 					if !ok {
 						return
@@ -193,10 +215,16 @@ func (c *Connection) dispatch(cm ClientMessage) {
 	}
 }
 
-// enqueueOrClose sends msg to the send channel; closes the connection if the channel is done.
+// enqueueOrClose sends msg to the appropriate channel — the data channel for
+// topic-message deliveries (history replay), the control channel for
+// everything else — blocking only until the connection is torn down.
 func (c *Connection) enqueueOrClose(msg ServerMessage) {
+	ch := c.control
+	if msg.Type == "message" {
+		ch = c.send
+	}
 	select {
-	case c.send <- msg:
+	case ch <- msg:
 	case <-c.done:
 	}
 }

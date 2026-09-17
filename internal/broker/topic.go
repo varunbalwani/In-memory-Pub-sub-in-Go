@@ -72,8 +72,10 @@ func (t *Topic) lastN(n int) []Message {
 }
 
 // publish fans out msg to all subscribers, appends to history, and applies backpressure.
-// Must be called with t.mu held (write lock).
-func (t *Topic) publish(msg Message, policy BackpressurePolicy) {
+// Must be called with t.mu held (write lock). Returns connections that PolicyDisconnect
+// selected for teardown; the caller must Close() them after releasing t.mu, since Close
+// can block on I/O and must not be run while the topic lock is held.
+func (t *Topic) publish(msg Message, policy BackpressurePolicy) []Connection {
 	// Append to ring buffer.
 	cap := cap(t.history)
 	if cap > 0 {
@@ -95,6 +97,7 @@ func (t *Topic) publish(msg Message, policy BackpressurePolicy) {
 		Message: &msg,
 	}
 
+	var toClose []Connection
 	for _, sub := range t.subscribers {
 		select {
 		case sub.send <- delivery:
@@ -103,7 +106,10 @@ func (t *Topic) publish(msg Message, policy BackpressurePolicy) {
 			// queue full — apply backpressure
 			switch policy {
 			case PolicyDrop:
-				// drain oldest, enqueue newest
+				// sub.send carries only topic-message deliveries (control frames —
+				// acks, errors, pongs, info — go over the connection's separate
+				// control channel), so it's safe to evict the oldest queued
+				// delivery and enqueue the newest one in its place.
 				select {
 				case <-sub.send:
 				default:
@@ -120,13 +126,15 @@ func (t *Topic) publish(msg Message, policy BackpressurePolicy) {
 						Message: "subscriber queue overflow",
 					},
 				}
-				// best-effort send of error, then close
+				// best-effort send of error, close deferred to the caller
 				select {
 				case sub.send <- errMsg:
 				default:
 				}
-				sub.conn.Close()
+				toClose = append(toClose, sub.conn)
 			}
 		}
 	}
+	return toClose
+	
 }
